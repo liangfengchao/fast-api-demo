@@ -1,0 +1,5 @@
+fastapi[standard]==0.112.0
+python-decouple==3.8
+pymysql==1.1.1
+sqlalchemy==1.4.42
+databases==0.8.0
