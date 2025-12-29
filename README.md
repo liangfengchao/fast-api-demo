@@ -89,6 +89,32 @@ python run.py
 fastapi dev main.py
 ```
 
+## 初始化超管账号
+
+在首次使用前，需要创建超管账号：
+
+```bash
+# 激活虚拟环境
+venv\Scripts\activate  # Windows
+# 或
+source venv/bin/activate  # Linux/Mac
+
+# 运行初始化脚本（使用默认参数）
+python scripts/init_admin.py
+
+# 或使用自定义参数
+python scripts/init_admin.py --username admin --password your_password
+```
+
+**默认超管账号：**
+- 用户名: `admin`
+- 密码: `admin123`
+- 邮箱: `admin@example.com`
+
+⚠️ **安全提示**: 首次登录后请立即修改密码！
+
+详细说明请查看 [scripts/README.md](scripts/README.md)
+
 ## API 文档
 
 启动应用后，访问以下地址查看 API 文档：

@@ -8,6 +8,7 @@ from datetime import datetime
 from app.repository.user_repository import UserRepository
 from app.models.user import User
 from app.schemas.user import UserCreate, UserUpdate
+from app.utils.password import get_password_hash
 
 
 class UserService:
@@ -65,7 +66,7 @@ class UserService:
         now = datetime.now()
         db_user = User(
             username=user_create.username,
-            password=user_create.password,  # 注意：实际应用中应该加密存储
+            password=get_password_hash(user_create.password),  # 密码加密存储
             email=user_create.email,
             first_name=user_create.first_name,
             last_name=user_create.last_name,
@@ -109,7 +110,7 @@ class UserService:
         
         # 更新其他字段
         if user_update.password is not None:
-            db_user.password = user_update.password  # 注意：实际应用中应该加密存储
+            db_user.password = get_password_hash(user_update.password)  # 密码加密存储
         if user_update.first_name is not None:
             db_user.first_name = user_update.first_name
         if user_update.last_name is not None:
