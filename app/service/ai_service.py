@@ -153,23 +153,11 @@ class AIService:
             for chunk in agent.stream(agent_input, {"configurable": configurable}, stream_mode="messages"):
                 # chunk 是一个消息对象列表
                 for msg in chunk:
-                    print(f"msg: {msg}, type: {type(msg)}")
-                    
                     # 如果是 AI 消息
                     if isinstance(msg, AIMessage):
                         # 处理文本内容（如果有）
-                        if msg.content:
-                            content = msg.content
-                            # 处理不同类型的 content
-                            if isinstance(content, str):
-                                yield {"type": "content", "data": content}
-                            elif isinstance(content, list):
-                                # content 可能是列表格式
-                                for item in content:
-                                    if isinstance(item, dict) and item.get('type') == 'text':
-                                        yield {"type": "content", "data": item.get('text', '')}
-                                    elif isinstance(item, str):
-                                        yield {"type": "content", "data": item}
+                        if msg.content and isinstance(msg.content, str):
+                            yield {"type": "content", "data": msg.content}
                   
                     # 如果是工具消息（工具执行结果）
                     elif isinstance(msg, ToolMessage):
@@ -250,6 +238,8 @@ class AIService:
             历史消息列表，格式为 [{"role": "user", "content": "..."}, ...]
         """
         try:
+            # 导入 ToolMessage 类型，用于过滤工具调用相关消息
+            from langchain_core.messages import ToolMessage,AIMessage
             # 构建 configurable 配置
             configurable = {"thread_id": conversation_id}
             if user_id:
@@ -269,8 +259,13 @@ class AIService:
             # 转换为前端需要的格式
             history = []
             for msg in messages:
-                # 跳过系统消息
-                if isinstance(msg, SystemMessage):
+                print(f"msg type: {type(msg)} : {msg}--------------------")
+                # 跳过系统消息和工具消息（工具中间过程不展示给前端）
+                if isinstance(msg, (SystemMessage, ToolMessage)):
+                    continue
+                
+                # 跳过包含工具调用的 AI 消息（这些是中间步骤，不展示给前端）
+                if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
                     continue
                 
                 role = "user" if isinstance(msg, HumanMessage) else "ai"
@@ -317,12 +312,12 @@ class AIService:
             filter_dict = {"user_id": str(user_id)} if user_id else None
             checkpoint_list = list[CheckpointTuple](self.checkpointer.list(None, filter=filter_dict))
             
-            # 提取每个会话的最新 checkpoint
-            thread_latest = {}
+            # 提取每个会话的最新 checkpoint（同时保留 metadata）
+            thread_latest: Dict[str, Dict[str, Any]] = {}
             for cp in checkpoint_list:
                 config = getattr(cp, 'config', {})
                 checkpoint = getattr(cp, 'checkpoint', {})
-                metadata = getattr(cp, 'metadata', {})
+                metadata = getattr(cp, 'metadata', {}) or {}
                 
                 configurable = config.get("configurable", {})
                 thread_id = configurable.get("thread_id")
@@ -335,11 +330,14 @@ class AIService:
                 if user_id and str(cp_user_id) != str(user_id):
                     continue
                 
-                # 保留每个 thread_id 的最新 checkpoint
+                # 保留每个 thread_id 的最新 checkpoint（包含最新的 metadata）
                 try:
                     ts_num = datetime.fromisoformat(ts.replace('Z', '+00:00')).timestamp()
                     if thread_id not in thread_latest or ts_num > thread_latest[thread_id]["timestamp"]:
-                        thread_latest[thread_id] = {"timestamp": ts_num}
+                        thread_latest[thread_id] = {
+                            "timestamp": ts_num,
+                            "metadata": metadata,
+                        }
                 except (ValueError, AttributeError):
                     continue
             
@@ -353,15 +351,24 @@ class AIService:
             # 构建返回数据
             conversations = []
             for thread_id, info in sorted_threads:
-                history = []
+                history: List[Dict[str, Any]] = []
                 title = "新会话"
-                try:
-                    history = self.get_conversation_history(thread_id, user_id)
-                    first_user_msg = next((msg for msg in history if msg["role"] == "user"), None)
-                    if first_user_msg:
-                        title = first_user_msg["content"][:30] + "..." if len(first_user_msg["content"]) > 30 else first_user_msg["content"]
-                except Exception:
-                    pass
+
+                # 1. 优先使用 metadata 中的自定义标题（如果存在）
+                metadata = info.get("metadata") or {}
+                meta_title = metadata.get("title")
+                if isinstance(meta_title, str) and meta_title.strip():
+                    title = meta_title.strip()
+                else:
+                    # 2. 否则通过第一条用户消息自动生成标题
+                    try:
+                        history = self.get_conversation_history(thread_id, user_id)
+                        first_user_msg = next((msg for msg in history if msg["role"] == "user"), None)
+                        if first_user_msg:
+                            content = first_user_msg["content"]
+                            title = content[:30] + "..." if len(content) > 30 else content
+                    except Exception:
+                        pass
                 
                 conversations.append({
                     "conversation_id": thread_id,
@@ -373,4 +380,75 @@ class AIService:
             return conversations
         except Exception:
             return []
+
+    def rename_conversation(
+        self,
+        conversation_id: str,
+        title: str,
+        user_id: Optional[str] = None
+    ) -> None:
+        """
+        重命名会话
+        
+        将 checkpoints 表中该会话所有记录的 metadata.title 更新为新的标题，
+        list_conversations 会优先使用 metadata 中的 title。
+        """
+        if not conversation_id or not title:
+            return
+
+        try:
+            # 使用 checkpointer 的底层连接执行 metadata JSON 更新
+            with self.checkpointer._cursor(pipeline=True) as cur:  # type: ignore[attr-defined]
+                # MySQL JSON_SET: 将 metadata 中的 title 字段更新为新值
+                cur.execute(
+                    """
+                    UPDATE checkpoints
+                    SET metadata = JSON_SET(
+                        COALESCE(metadata, JSON_OBJECT()),
+                        '$.title',
+                        %s
+                    )
+                    WHERE thread_id = %s
+                    """,
+                    (title, conversation_id),
+                )
+        except Exception as e:
+            print(f"重命名会话 {conversation_id} 失败: {str(e)}")
+
+    def delete_conversation(
+        self,
+        conversation_id: str,
+        user_id: Optional[str] = None
+    ) -> None:
+        """
+        删除会话（物理删除）
+        
+        会删除 MySQL 中与该 thread_id 相关的所有 checkpoint 记录：
+        - checkpoints
+        - checkpoint_blobs
+        - checkpoint_writes
+        """
+        if not conversation_id:
+            return
+
+        # 使用 checkpointer 的底层连接执行物理删除
+        try:
+            # PyMySQLSaver 继承自 BaseSyncMySQLSaver，提供 _cursor 上下文管理器
+            with self.checkpointer._cursor(pipeline=True) as cur:  # type: ignore[attr-defined]
+                # 先删依赖表，再删主表
+                cur.execute(
+                    "DELETE FROM checkpoint_writes WHERE thread_id = %s",
+                    (conversation_id,),
+                )
+                cur.execute(
+                    "DELETE FROM checkpoint_blobs WHERE thread_id = %s",
+                    (conversation_id,),
+                )
+                cur.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = %s",
+                    (conversation_id,),
+                )
+        except Exception as e:
+            # 这里不抛出，让上层自己处理日志 / 返回值
+            print(f"删除会话 {conversation_id} 失败: {str(e)}")
 

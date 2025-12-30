@@ -6,7 +6,7 @@ AI 对话控制器
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from app.service.ai_service import AIService
-from app.schemas.ai import ChatRequest, ChatResponse
+from app.schemas.ai import ChatRequest, ChatResponse, ConversationRenameRequest
 from app.utils.response import R
 from app.middleware.auth import get_current_user
 from app.models.user import User
@@ -163,7 +163,7 @@ async def get_conversation_history(
         history = await asyncio.to_thread(
             service.get_conversation_history,
             conversation_id,
-            current_user.id
+            str(current_user.id)
         )
         return R.success(
             data=history,
@@ -212,6 +212,54 @@ async def list_conversations(
     except Exception as e:
         return R.error(message=f"获取会话列表失败: {str(e)}")
 
+
+@router.put("/conversations/{conversation_id}/title", summary="重命名会话")
+async def rename_conversation(
+    conversation_id: str,
+    request: ConversationRenameRequest,
+    current_user: User = Depends(get_current_user),  # 添加token验证拦截
+):
+    """
+    重命名会话标题（仅在后端内存中记录元数据）
+
+    - **conversation_id**: 会话ID（必填）
+    - **title**: 新的会话标题（必填）
+    """
+    try:
+        service = get_ai_service()
+        # 同步方法，放到线程池中执行，避免阻塞
+        await asyncio.to_thread(
+            service.rename_conversation,
+            conversation_id,
+            request.title,
+            str(current_user.id) if current_user else None,
+        )
+        return R.success(message="重命名成功")
+    except Exception as e:
+        return R.error(message=f"重命名失败: {str(e)}")
+
+
+@router.delete("/conversations/{conversation_id}", summary="删除会话")
+async def delete_conversation(
+    conversation_id: str,
+    current_user: User = Depends(get_current_user),  # 添加token验证拦截
+):
+    """
+    删除会话（逻辑删除，前端列表中不再显示）
+
+    - **conversation_id**: 会话ID（必填）
+    """
+    try:
+        service = get_ai_service()
+        # 同步方法，放到线程池中执行，避免阻塞
+        await asyncio.to_thread(
+            service.delete_conversation,
+            conversation_id,
+            str(current_user.id) if current_user else None,
+        )
+        return R.success(message="删除会话成功")
+    except Exception as e:
+        return R.error(message=f"删除会话失败: {str(e)}")
 
 @router.post("/chat/stream", summary="AI 对话（流式）")
 async def chat_stream(

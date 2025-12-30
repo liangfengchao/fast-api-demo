@@ -1,28 +1,28 @@
 """
 网络搜索工具
-使用 Google Custom Search API 进行网络搜索
+使用 DuckDuckGo 进行网络搜索
 """
-from langchain_google_community import GoogleSearchAPIWrapper
-from typing import Optional
-from decouple import config
+from ddgs import DDGS
 from langchain.tools import tool
-# 从环境变量获取 Google API 配置
-GOOGLE_API_KEY = config('GOOGLE_API_KEY', default='')
-GOOGLE_CSE_ID = config('GOOGLE_CSE_ID', default='')
-
 
 @tool
-def get_google_search_wrapper() -> Optional[GoogleSearchAPIWrapper]:
-    """获取 Google 搜索包装器实例（供 LangChain Agent 使用）"""
-    if not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
-        print("警告: GOOGLE_API_KEY 或 GOOGLE_CSE_ID 未配置，无法启用搜索功能")
-        return None
-    
+def web_search(query: str) -> str:
+    """使用 DuckDuckGo 进行网络搜索"""
     try:
-        return GoogleSearchAPIWrapper(
-            google_api_key=GOOGLE_API_KEY,
-            google_cse_id=GOOGLE_CSE_ID
-        )
+        ddgs = DDGS()
+        results = ddgs.text(query, max_results=5)
+        if not results:
+            return f"未找到关于 '{query}' 的搜索结果。"
+        
+        # 格式化搜索结果
+        formatted_results = []
+        for result in results:
+            title = result.get('title', '')
+            body = result.get('body', '')
+            url = result.get('href', '')
+            if title or body:
+                formatted_results.append(f"标题: {title}\n内容: {body}\n链接: {url}")
+        
+        return "\n\n".join(formatted_results) if formatted_results else f"未找到关于 '{query}' 的搜索结果。"
     except Exception as e:
-        print(f"警告: 无法创建 GoogleSearchAPIWrapper: {str(e)}")
-        return None
+        return f"搜索出错: {str(e)}"

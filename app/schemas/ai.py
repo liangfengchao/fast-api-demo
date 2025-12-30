@@ -24,3 +24,7 @@ class ChatResponse(BaseModel):
     conversation_id: Optional[str] = None  # 会话ID
     finish_reason: Optional[str] = None  # 完成原因
 
+
+class ConversationRenameRequest(BaseModel):
+    """会话重命名请求模型"""
+    title: str  # 新的会话标题

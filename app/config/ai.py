@@ -8,6 +8,7 @@ from langchain.agents import create_agent, AgentState
 from langchain.tools import tool
 from typing import Optional, List, TypedDict, Dict, Any
 from app.config.checkpointer import get_checkpointer
+import os
 
 # AI 模型配置
 AI_API_KEY = config('DASHSCOPE_API_KEY', default='')
@@ -16,8 +17,58 @@ AI_MODEL = config('DASHSCOPE_MODEL', default='gpt-3.5-turbo')
 AI_TEMPERATURE = config('AI_TEMPERATURE', default=0.7, cast=float)
 AI_SYSTEM_PROMPT = config('AI_SYSTEM_PROMPT', default='你是一个有用的AI助手。')
 
+# LangSmith 配置
+LANGSMITH_TRACING = config('LANGSMITH_TRACING', default='false', cast=bool)
+LANGSMITH_ENDPOINT = config('LANGSMITH_ENDPOINT', default='https://api.smith.langchain.com')
+LANGSMITH_PROJECT = config('LANGSMITH_PROJECT', default='fast-api-demo')
+LANGSMITH_API_KEY = config('LANGSMITH_API_KEY', default='')
+
+# LangSmith 客户端（可选）
+langsmith_client = None
+
+# 初始化 LangSmith（如果启用）
+def init_langsmith():
+    """初始化 LangSmith 追踪"""
+    global langsmith_client
+    
+    # 检查是否启用
+    if not LANGSMITH_TRACING:
+        print("ℹ️  LangSmith 未启用（设置 LANGSMITH_TRACING=true 以启用）")
+        return None
+    
+    if not LANGSMITH_API_KEY:
+        print("⚠️  LangSmith 已配置但缺少 API Key（设置 LANGSMITH_API_KEY 以启用）")
+        return None
+    
+    # 设置环境变量（LangChain 会自动读取这些环境变量）
+    os.environ['LANGSMITH_TRACING'] = 'true'
+    os.environ['LANGSMITH_API_KEY'] = LANGSMITH_API_KEY
+    os.environ['LANGSMITH_PROJECT'] = LANGSMITH_PROJECT
+    if LANGSMITH_ENDPOINT:
+        os.environ['LANGSMITH_ENDPOINT'] = LANGSMITH_ENDPOINT
+    
+    # 初始化 LangSmith 客户端（可选，用于手动操作）
+    try:
+        from langsmith import Client
+        langsmith_client = Client(
+            api_key=LANGSMITH_API_KEY,
+            api_url=LANGSMITH_ENDPOINT
+        )
+        print(f"✅ LangSmith 已启用，项目: {LANGSMITH_PROJECT}")
+        return langsmith_client
+    except ImportError:
+        print("⚠️  LangSmith 未安装，请运行: pip install langsmith")
+        return None
+    except Exception as e:
+        print(f"⚠️  LangSmith 初始化失败: {str(e)}")
+        return None
+
+# 自动初始化
+init_langsmith()
+
 class CustomAgentState(AgentState):  # [!code highlight]
     user_id: str  # [!code highlight]
+    title: str  # [!code highlight]
 
 def get_llm(
     model_name: Optional[str] = None,
@@ -76,10 +127,8 @@ def get_tools(enable_web_search: bool = False) -> List:
     
     # 网络搜索工具
     if enable_web_search:
-        from app.tools.web_search import get_google_search_wrapper
-        
-        tools.append(get_google_search_wrapper)
-            
+        from app.tools.web_search import web_search
+        tools.append(web_search)
     return tools
 
 def get_agent(
@@ -116,7 +165,8 @@ def get_agent(
     agent_kwargs = {
         "model": model,
         "tools": agent_tools,
-        "state_schema": CustomAgentState
+        "state_schema": CustomAgentState,
+        "debug": True,
     }
     
     # 配置 checkpointer
