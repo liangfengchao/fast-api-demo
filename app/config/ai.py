@@ -5,7 +5,9 @@ AI 模型配置模块
 from decouple import config
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent, AgentState
+from langchain.agents.middleware import wrap_tool_call
 from langchain.tools import tool
+from langchain_core.messages import ToolMessage
 from typing import Optional, List, TypedDict, Dict, Any
 from app.config.checkpointer import get_checkpointer
 import os
@@ -65,6 +67,25 @@ def init_langsmith():
 
 # 自动初始化
 init_langsmith()
+
+
+@wrap_tool_call
+def handle_tool_errors(request, handler):
+    """
+    统一工具错误处理：
+    - 捕获工具执行过程中的异常
+    - 返回带有友好错误提示的 ToolMessage，而不是让异常直接向上抛出
+    """
+    try:
+        return handler(request)
+    except Exception as e:
+        # 这里可以根据需要改成 logging 记录
+        print(f"工具执行发生错误: {e}")
+        # 返回给模型的 ToolMessage，由 Agent 接着处理
+        return ToolMessage(
+            content=f"工具错误：请检查您的输入并重试。（错误详情：{str(e)}）",
+            tool_call_id=request.tool_call["id"],
+        )
 
 class CustomAgentState(AgentState):  # [!code highlight]
     user_id: str  # [!code highlight]
@@ -167,6 +188,8 @@ def get_agent(
         "tools": agent_tools,
         "state_schema": CustomAgentState,
         "debug": True,
+        # 中间件：统一处理工具错误
+        "middleware": [handle_tool_errors],
     }
     
     # 配置 checkpointer

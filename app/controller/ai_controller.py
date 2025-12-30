@@ -79,12 +79,9 @@ async def generate_stream_response(
                 # 文本内容
                 full_response += event_data
                 yield f"data: {json_dumps_utf8({'type': 'content', 'data': event_data})}\n\n"
-            elif event_type == 'search':
-                # 搜索结果
-                yield f"data: {json_dumps_utf8({'type': 'search', 'data': event_data})}\n\n"
-            elif event_type == 'tool_call':
-                # 工具调用提示
-                yield f"data: {json_dumps_utf8({'type': 'tool_call', 'data': event_data})}\n\n"
+            elif event_type == 'thought_chain':
+                # 思维链信息（工具调用、工具执行结果等）
+                yield f"data: {json_dumps_utf8({'type': 'thought_chain', 'data': event_data})}\n\n"
         
         # 发送完成信号（包含完整回复和会话ID）
         yield f"data: {json_dumps_utf8({'type': 'done', 'data': full_response, 'conversation_id': conversation_id})}\n\n"
@@ -278,16 +275,14 @@ async def chat_stream(
     流式响应格式（SSE）：
     - type: 'conversation_id' - 会话ID
     - type: 'content' - 内容块（实时流式输出）
-    - type: 'search' - 搜索结果（当启用搜索时）
-    - type: 'tool_call' - 工具调用提示
+    - type: 'thought_chain' - 思维链信息（工具调用和执行结果）
     - type: 'done' - 完成信号（包含完整回复和会话ID）
     - type: 'error' - 错误信息
     
     示例：
     ```
     data: {"type": "conversation_id", "data": "xxx-xxx-xxx"}
-    data: {"type": "tool_call", "data": "search_web"}
-    data: {"type": "search", "data": [{"title": "...", "url": "...", "snippet": "..."}]}
+    data: {"type": "thought_chain", "data": {"codeId": "...", "title": "...", "status": "loading"}}
     data: {"type": "content", "data": "你好"}
     data: {"type": "done", "data": "你好！", "conversation_id": "xxx-xxx-xxx"}
     ```

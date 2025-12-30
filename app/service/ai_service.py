@@ -155,15 +155,82 @@ class AIService:
                 for msg in chunk:
                     # 如果是 AI 消息
                     if isinstance(msg, AIMessage):
+                        # 检测工具调用（思维链的一部分）
+                        if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                            print(f"----------------------AIMessage msg: {msg} {type(msg)}-------------------------------")
+                            for tool_call in msg.tool_calls:
+                                tool_name = tool_call.get('name', '')
+                                tool_args = tool_call.get('args', {})
+                                tool_call_id = tool_call.get('id', '')
+
+                                if not tool_name or not tool_name.strip():
+                                    continue
+
+                                # 工具名称映射（中文化）
+                                tool_name_map = {
+                                    'web_search': '网络搜索',
+                                    'get_current_time': '获取当前时间'
+                                }
+                                display_name = tool_name_map.get(tool_name, tool_name)
+                                
+                                # 格式化工具参数描述
+                                args_description = ''
+                                if tool_args:
+                                    if 'query' in tool_args:
+                                        args_description = f"查询: {tool_args['query']}"
+                                    else:
+                                        import json
+                                        args_description = json.dumps(tool_args, ensure_ascii=False)
+                                
+                                # 返回工具调用信息（思维链）- 使用新的 ThoughtChainItem 格式
+                                # 初始状态为 loading
+                                yield {
+                                    "type": "thought_chain",
+                                    "data": {
+                                        "codeId": tool_call_id or f"{tool_name}-{id(tool_call)}",
+                                        "title": display_name,
+                                        "thinkTitle": f"正在调用工具: {display_name}",
+                                        "thinkContent": args_description or "正在执行...",
+                                        "status": "loading"
+                                    }
+                                }
+                        
                         # 处理文本内容（如果有）
                         if msg.content and isinstance(msg.content, str):
                             yield {"type": "content", "data": msg.content}
                   
-                    # 如果是工具消息（工具执行结果）
+                    # 如果是工具消息（工具执行结果，思维链的一部分）
                     elif isinstance(msg, ToolMessage):
-                        # 工具执行完成，可以在这里处理结果
-                        # 但通常工具结果会被 Agent 自动处理，不需要单独输出
-                        pass
+                        print(f"----------------------ToolMessage msg: {msg} {type(msg)}-------------------------------")
+                        tool_name = getattr(msg, 'name', '') or ''
+                        tool_content = msg.content if hasattr(msg, 'content') else str(msg)
+                        tool_call_id = getattr(msg, 'tool_call_id', '') or ''
+                        
+                        # 工具名称映射（中文化）
+                        tool_name_map = {
+                            'web_search': '网络搜索',
+                            'get_current_time': '获取当前时间'
+                        }
+                        display_name = tool_name_map.get(tool_name, tool_name)
+                        
+                        # 格式化工具执行结果
+                        result_content = tool_content
+                        if len(result_content) > 500:
+                            result_content = result_content[:500] + '...'
+                        
+                        # 返回工具执行结果（思维链）- 使用新的 ThoughtChainItem 格式
+                        # 状态为 success（执行成功）或 error（执行失败）
+                        # 这里假设执行成功，如果失败可以在其他地方设置 status 为 'error'
+                        yield {
+                            "type": "thought_chain",
+                            "data": {
+                                "codeId": tool_call_id or f"{tool_name}-{id(msg)}",
+                                "title": display_name,
+                                "thinkTitle": f"工具 {display_name} 执行完成",
+                                "thinkContent": result_content,
+                                "status": "success"
+                            }
+                        }
         except Exception as e:
             # 如果流式传输出错，抛出异常
             raise Exception(f"Agent 流式传输错误: {str(e)}")
@@ -259,7 +326,6 @@ class AIService:
             # 转换为前端需要的格式
             history = []
             for msg in messages:
-                print(f"msg type: {type(msg)} : {msg}--------------------")
                 # 跳过系统消息和工具消息（工具中间过程不展示给前端）
                 if isinstance(msg, (SystemMessage, ToolMessage)):
                     continue
