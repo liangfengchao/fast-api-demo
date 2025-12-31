@@ -8,6 +8,7 @@ from typing import Optional, List, Iterator, Dict, Any
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from app.config.ai import get_agent, get_system_prompt
 from app.config.checkpointer import get_checkpointer
+from app.config.tools import get_tool_display_name as get_tool_display_name_from_config
 from decouple import config
 from datetime import datetime
 import pymysql
@@ -111,6 +112,87 @@ class AIService:
         
         return configurable
     
+    def _format_tool_call_thought_chain(
+        self,
+        tool_call: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        格式化工具调用的思维链信息
+        
+        Args:
+            tool_call: 工具调用字典，包含 name, args, id 等字段
+        
+        Returns:
+            思维链字典，如果工具调用无效则返回 None
+        """
+        tool_name = tool_call.get('name', '')
+        tool_args = tool_call.get('args', {})
+        tool_call_id = tool_call.get('id', '')
+        
+        if not tool_name or not tool_name.strip():
+            return None
+        
+        display_name = get_tool_display_name_from_config(tool_name)
+        
+        # 格式化工具参数描述
+        args_description = ''
+        if tool_args:
+            if 'query' in tool_args:
+                args_description = f"查询: {tool_args['query']}"
+            else:
+                args_description = json.dumps(tool_args, ensure_ascii=False)
+        
+        # 返回工具调用信息（思维链）- 使用新的 ThoughtChainItem 格式
+        # 初始状态为 loading
+        return {
+            "type": "thought_chain",
+            "data": {
+                "codeId": tool_call_id or f"{tool_name}-{id(tool_call)}",
+                "title": display_name,
+                "thinkTitle": f"正在调用工具: {display_name}",
+                "thinkContent": args_description or "正在执行...",
+                "status": "loading"
+            }
+        }
+    
+    def _format_tool_result_thought_chain(
+        self,
+        tool_message: Any
+    ) -> Dict[str, Any]:
+        """
+        格式化工具执行结果的思维链信息
+        
+        Args:
+            tool_message: ToolMessage 对象
+        
+        Returns:
+            思维链字典
+        """
+        tool_name = getattr(tool_message, 'name', '') or ''
+        tool_content = tool_message.content if hasattr(tool_message, 'content') else str(tool_message)
+        tool_call_id = getattr(tool_message, 'tool_call_id', '') or ''
+        
+        display_name = get_tool_display_name_from_config(tool_name)
+        
+        # 格式化工具执行结果
+        result_content = tool_content
+        if len(result_content) > 200:
+            result_content = result_content[:200] + '...'
+        
+        # 返回工具执行结果（思维链）- 使用新的 ThoughtChainItem 格式
+        # 状态为 success（执行成功）或 error（执行失败）
+        # 这里假设执行成功，如果失败可以在其他地方设置 status 为 'error'
+        return {
+            "type": "thought_chain",
+            "data": {
+                "codeId": tool_call_id or f"{tool_name}-{id(tool_message)}",
+                "title": display_name,
+                "thinkTitle": f"工具 {display_name} 执行完成",
+                "thinkContent": result_content,
+                "status": "success"
+            }
+        }
+    
     def chat_stream(
         self,
         message: str,
@@ -157,43 +239,10 @@ class AIService:
                     if isinstance(msg, AIMessage):
                         # 检测工具调用（思维链的一部分）
                         if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                            print(f"----------------------AIMessage msg: {msg} {type(msg)}-------------------------------")
                             for tool_call in msg.tool_calls:
-                                tool_name = tool_call.get('name', '')
-                                tool_args = tool_call.get('args', {})
-                                tool_call_id = tool_call.get('id', '')
-
-                                if not tool_name or not tool_name.strip():
-                                    continue
-
-                                # 工具名称映射（中文化）
-                                tool_name_map = {
-                                    'web_search': '网络搜索',
-                                    'get_current_time': '获取当前时间'
-                                }
-                                display_name = tool_name_map.get(tool_name, tool_name)
-                                
-                                # 格式化工具参数描述
-                                args_description = ''
-                                if tool_args:
-                                    if 'query' in tool_args:
-                                        args_description = f"查询: {tool_args['query']}"
-                                    else:
-                                        import json
-                                        args_description = json.dumps(tool_args, ensure_ascii=False)
-                                
-                                # 返回工具调用信息（思维链）- 使用新的 ThoughtChainItem 格式
-                                # 初始状态为 loading
-                                yield {
-                                    "type": "thought_chain",
-                                    "data": {
-                                        "codeId": tool_call_id or f"{tool_name}-{id(tool_call)}",
-                                        "title": display_name,
-                                        "thinkTitle": f"正在调用工具: {display_name}",
-                                        "thinkContent": args_description or "正在执行...",
-                                        "status": "loading"
-                                    }
-                                }
+                                thought_chain = self._format_tool_call_thought_chain(tool_call)
+                                if thought_chain:
+                                    yield thought_chain
                         
                         # 处理文本内容（如果有）
                         if msg.content and isinstance(msg.content, str):
@@ -201,36 +250,8 @@ class AIService:
                   
                     # 如果是工具消息（工具执行结果，思维链的一部分）
                     elif isinstance(msg, ToolMessage):
-                        print(f"----------------------ToolMessage msg: {msg} {type(msg)}-------------------------------")
-                        tool_name = getattr(msg, 'name', '') or ''
-                        tool_content = msg.content if hasattr(msg, 'content') else str(msg)
-                        tool_call_id = getattr(msg, 'tool_call_id', '') or ''
-                        
-                        # 工具名称映射（中文化）
-                        tool_name_map = {
-                            'web_search': '网络搜索',
-                            'get_current_time': '获取当前时间'
-                        }
-                        display_name = tool_name_map.get(tool_name, tool_name)
-                        
-                        # 格式化工具执行结果
-                        result_content = tool_content
-                        if len(result_content) > 500:
-                            result_content = result_content[:500] + '...'
-                        
-                        # 返回工具执行结果（思维链）- 使用新的 ThoughtChainItem 格式
-                        # 状态为 success（执行成功）或 error（执行失败）
-                        # 这里假设执行成功，如果失败可以在其他地方设置 status 为 'error'
-                        yield {
-                            "type": "thought_chain",
-                            "data": {
-                                "codeId": tool_call_id or f"{tool_name}-{id(msg)}",
-                                "title": display_name,
-                                "thinkTitle": f"工具 {display_name} 执行完成",
-                                "thinkContent": result_content,
-                                "status": "success"
-                            }
-                        }
+                        thought_chain = self._format_tool_result_thought_chain(msg)
+                        yield thought_chain
         except Exception as e:
             # 如果流式传输出错，抛出异常
             raise Exception(f"Agent 流式传输错误: {str(e)}")
