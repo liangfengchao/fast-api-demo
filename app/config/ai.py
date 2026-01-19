@@ -15,7 +15,7 @@ import os
 # AI 模型配置
 AI_API_KEY = config('DASHSCOPE_API_KEY', default='')
 AI_BASE_URL = config('DASHSCOPE_BASE_URL', default=None)
-AI_MODEL = config('DASHSCOPE_MODEL', default='gpt-3.5-turbo')
+AI_MODEL = config('ADVANCED_MODEL_NAME', default='gpt-3.5-turbo')
 AI_TEMPERATURE = config('AI_TEMPERATURE', default=0.7, cast=float)
 AI_SYSTEM_PROMPT = config('AI_SYSTEM_PROMPT', default='你是一个有用的AI助手。')
 
@@ -145,11 +145,43 @@ def get_tools(enable_web_search: bool = False) -> List:
     # 时间工具
     from app.tools.time_tool import get_current_time
     tools.append(get_current_time)
+
+    # 用户查询工具（隐藏密码字段）
+    from app.tools.user_tool import query_user_info
+    tools.append(query_user_info)
     
     # 网络搜索工具
     if enable_web_search:
         from app.tools.web_search import web_search
         tools.append(web_search)
+    return tools
+
+
+def get_all_tools() -> List:
+    """
+    获取所有可用的工具列表（包括网络搜索工具）
+    
+    Returns:
+        包含所有工具的工具列表
+    """
+    tools = []
+    
+    # 时间工具
+    from app.tools.time_tool import get_current_time
+    tools.append(get_current_time)
+
+    # 用户查询工具（隐藏密码字段）
+    from app.tools.user_tool import query_user_info
+    tools.append(query_user_info)
+    
+    # 网络搜索工具（始终包含）
+    try:
+        from app.tools.web_search import web_search
+        tools.append(web_search)
+    except ImportError:
+        # 如果 web_search 工具不存在，跳过
+        pass
+    
     return tools
 
 def get_agent(

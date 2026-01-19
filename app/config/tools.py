@@ -7,6 +7,7 @@
 TOOL_NAME_MAP: dict[str, str] = {
     'web_search': '网络搜索',
     'get_current_time': '获取当前时间',
+    'query_user_info': '查询用户信息',
 }
 
 

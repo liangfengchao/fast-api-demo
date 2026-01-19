@@ -6,13 +6,19 @@ Checkpointer 配置模块
 """
 from typing import Optional
 import pymysql
+import aiomysql
 from decouple import config
 from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
+from langgraph.checkpoint.mysql.aio import AIOMySQLSaver
 
 
 # 全局 checkpointer 实例（单例模式）
 _checkpointer_instance: Optional[PyMySQLSaver] = None
 _connection: Optional[pymysql.Connection] = None
+
+# Async checkpointer
+_async_checkpointer_instance: Optional[AIOMySQLSaver] = None
+_async_connection: Optional[aiomysql.Connection] = None
 
 
 def get_checkpointer() -> PyMySQLSaver:
@@ -64,6 +70,48 @@ def get_checkpointer() -> PyMySQLSaver:
             raise
     
     _checkpointer_instance = checkpointer
+    return checkpointer
+
+
+async def get_async_checkpointer() -> AIOMySQLSaver:
+    """
+    获取异步 MySQL Checkpointer 实例（用于 astream 等异步调用）。
+    """
+    global _async_checkpointer_instance, _async_connection
+
+    if _async_checkpointer_instance is not None:
+        return _async_checkpointer_instance
+
+    # 从 .env 文件读取数据库配置
+    db_user = config('DB_USER')
+    db_password = config('DB_PASSWORD')
+    db_host = config('DB_HOST')
+    db_port = config('DB_PORT', cast=int)
+    db_name = config('DB_NAME')
+
+    # 创建异步连接
+    # aiomysql 是 MySQL 的异步客户端库
+    _async_connection = await aiomysql.connect(
+        host=db_host,
+        port=db_port,
+        user=db_user,
+        password=db_password,
+        db=db_name,
+        autocommit=True,
+    )
+
+    # 使用连接创建 AIOMySQLSaver 实例
+    checkpointer = AIOMySQLSaver(conn=_async_connection)
+
+    # 初始化数据库表（首次使用时调用，会自动创建默认表）
+    try:
+        await checkpointer.setup()
+    except Exception as e:
+        error_str = str(e).lower()
+        if "already exists" not in error_str and "duplicate" not in error_str:
+            raise
+
+    _async_checkpointer_instance = checkpointer
     return checkpointer
 
 

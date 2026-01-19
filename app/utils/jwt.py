@@ -9,7 +9,7 @@ from decouple import config
 # JWT配置
 SECRET_KEY = config('SECRET_KEY', default='your-secret-key-change-in-production')
 ALGORITHM = 'HS256'
-ACCESS_TOKEN_EXPIRE_MINUTES = config('ACCESS_TOKEN_EXPIRE_MINUTES', default=1, cast=int)  # 默认24小时
+ACCESS_TOKEN_EXPIRE_MINUTES = config('ACCESS_TOKEN_EXPIRE_MINUTES', default=60, cast=int)  # 默认24小时
 REFRESH_TOKEN_EXPIRE_MINUTES = config('REFRESH_TOKEN_EXPIRE_MINUTES', default=1440, cast=int)  # 默认24小时
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """
