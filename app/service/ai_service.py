@@ -340,7 +340,9 @@ class AIService:
             state = self.agent.get_state(config)
             if not state or len(state) == 0:
                 return []
-            
+            print("*************************************************")
+            print(state)
+            print("*************************************************")
             # 从状态中提取消息
             messages = state[0].get("messages", [])
             

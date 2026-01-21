@@ -149,6 +149,10 @@ def get_tools(enable_web_search: bool = False) -> List:
     # 用户查询工具（隐藏密码字段）
     from app.tools.user_tool import query_user_info
     tools.append(query_user_info)
+
+    # 天气查询工具
+    from app.tools.weather_tool import get_weather
+    tools.append(get_weather)
     
     # 网络搜索工具
     if enable_web_search:
@@ -173,6 +177,10 @@ def get_all_tools() -> List:
     # 用户查询工具（隐藏密码字段）
     from app.tools.user_tool import query_user_info
     tools.append(query_user_info)
+    
+    # 天气查询工具
+    from app.tools.weather_tool import get_weather
+    tools.append(get_weather)
     
     # 网络搜索工具（始终包含）
     try:

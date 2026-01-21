@@ -6,11 +6,12 @@ AI 对话控制器
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from app.service.ai_service import AIService
-from app.schemas.ai import ChatRequest, ChatResponse, ConversationRenameRequest, StructuredOutputRequest, GraphApiRequest, ManualReviewRequest, UniversalAgentRequest, UniversalAgentResponse
+from app.service.conversation_history_service import ConversationHistoryService
+from app.schemas.ai import ChatRequest, ChatResponse, ConversationRenameRequest, StructuredOutputRequest, GraphApiRequest, ManualReviewRequest, UniversalAgentRequest, UniversalAgentResponse, RouterChatRequest
 from app.utils.response import R
 from app.middleware.auth import get_current_user
 from app.models.user import User
-from typing import Optional
+from typing import Optional, Any, Dict
 import json
 import asyncio
 import io
@@ -1425,3 +1426,394 @@ async def universal_agent_chat_stream(
             error_stream(),
             media_type="text/event-stream"
         )
+
+
+@router.post("/router/chat/stream", summary="路由对话（流式，自动选择智能体）")
+async def router_chat_stream(
+    request: RouterChatRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    统一路由入口：根据输入自动选择调用 chat_agent（AIService）或 universal_agent（UniversalAgentService）。
+    SSE 首条会额外输出 agent_selected，方便前端调试与展示。
+    """
+
+    async def generate_router_stream():
+        """
+        路由对话流式输出生成器。
+
+        该函数实现了一个智能路由系统，支持根据用户输入动态选择最合适的AI代理，
+        并通过流式响应实时输出处理过程，包括规划、执行、验证等各个阶段。
+
+        处理流程：
+        1. 初始化会话状态和代理配置
+        2. 从代理的更新流中实时获取节点执行状态
+        3. 将原始节点数据转换为前端友好的流式事件
+        4. 支持多节点并发处理和错误恢复
+
+        Yields:
+            格式化的SSE数据流，包含节点执行状态和结果
+        """
+        import uuid
+        try:
+            # 如果没有 conversation_id，则视为新会话，在 controller 层统一生成
+            conversation_id = request.conversation_id or str(uuid.uuid4())
+
+            # 从 DB 取会话摘要（可选）
+            summary_text = None
+            history_messages = []
+            history_service = ConversationHistoryService()
+            if conversation_id:
+                summary_context = history_service.get_summary_context(conversation_id)
+                summary_text = summary_context.get("summary_text") or summary_context.get("raw_summary")
+                history_messages = summary_context.get("history_messages") or []
+
+            from app.agents.orchestrator_agent import get_orchestrator_stream_agent
+            from langchain_core.messages import HumanMessage
+
+            agent = get_orchestrator_stream_agent()
+            initial_state = {
+                "messages": [HumanMessage(content=request.message)],
+                "agent_type": request.preferred_agent,
+                "summary": summary_text,
+                "history_messages": history_messages,
+                "reply": None,
+                "universal_result": None,
+                "events": [],
+                # 会话ID由 controller 统一生成并写入 state，graph 内不再生成
+                "conversation_id": conversation_id,
+                "user_id": request.user_id or (str(current_user.id) if current_user else None),
+                "enable_web_search": request.enable_web_search,
+                # UniversalAgentState 字段（用于子图兼容）
+                "plan": None,
+                "plan_steps": [],
+                "current_step_index": -1,
+                "execution_results": [],
+                "verification_result": None,
+                "iteration_count": 0,
+                "max_iterations": 10,
+                "plan_parse_failed": False,
+                "turn_count": 0,
+            }
+
+            # ---------- 持久化：保存会话与用户消息 ----------
+            user_id_value = request.user_id or (str(current_user.id) if current_user else None)
+            human_message_id: Optional[int] = None
+            try:
+                human_message_id = history_service.ensure_conversation_and_save_user_message(
+                    conversation_id=conversation_id,
+                    user_id=user_id_value,
+                    message=request.message,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception("保存用户消息失败（路由流式）")
+
+            # 按子图可选处理事件（可在此扩展不同子图的特殊处理逻辑）
+            def _handle_universal_agent_event(node_value: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                """
+                处理 universal_agent 节点的流式输出事件。
+
+                该函数将原始节点数据转换为前端友好的流式事件格式，
+                支持规划(plan)、执行(execute)、验证(verify)、摘要(summary)等节点类型。
+
+                Args:
+                    node_value: 节点输出的原始数据字典
+
+                Returns:
+                    格式化的流式事件字典，包含 type 和 data 字段；如果无有效数据则返回 None
+                """
+                from typing import Callable, Tuple
+
+                # 定义数据提取器函数 - 每个函数负责从对应类型的节点中提取有用的数据
+                def extract_plan_data(node: Dict[str, Any]) -> Dict[str, Any]:
+                    """从规划(plan)节点中提取规划文本"""
+                    return { "data": node.get("plan", "")}
+
+                def extract_execute_data(node: Dict[str, Any]) -> Dict[str, Any]:
+                    """从执行(execute)节点中提取最新的执行结果"""
+                    execution_results = node.get("execution_results", [])
+                    # 如果有执行结果，返回最新的那个；否则返回空字符串
+                    return { "data":execution_results[-1] if execution_results else ""}
+
+                def extract_verify_data(node: Dict[str, Any]) -> Dict[str, Any]:
+                    """从验证(verify)节点中提取验证结果"""
+                    return {"data": node.get("verification_result", "")}
+
+                def extract_summary_data(node: Dict[str, Any]) -> Dict[str, Any]:
+                    """从摘要(summary)节点中提取摘要文本"""
+                    return {"data": node.get("summary", "")}
+                def extract_universal_agent_data(node: Dict[str, Any]) -> Dict[str, Any]:
+                    """从通用智能体(universal_agent)节点中提取数据"""
+                    return {
+                        "data": node.get("summary", ""),
+                        "plan": node.get("plan", ""),
+                        "execution_results": node.get("execution_results", []),
+                        "verification_result": node.get("verification_result", ""),
+                        "iteration_count": node.get("iteration_count", 0),
+                        "summary": node.get("summary", ""),
+                        "conversation_id": node.get("conversation_id"),
+                    }
+                # 定义节点处理器配置：节点键 -> (事件类型, 数据提取器函数)
+                # 注意：只有 universal_agent 的子节点需要这里，其它智能体使用专门的处理器
+                node_processors: Dict[str, Tuple[str, Callable[[Dict[str, Any]], Any]]] = {
+                    "plan": ("plan", extract_plan_data),
+                    "execute": ("execution", extract_execute_data),
+                    "verify": ("verification", extract_verify_data),
+                    "summary": ("content", extract_summary_data),
+                    "universal_agent": ("done", extract_universal_agent_data),
+                }
+
+                # 按优先级遍历节点类型，找到第一个包含有效数据的节点
+                for node_key, (event_type, data_extractor) in node_processors.items():
+                    # 检查该类型的节点是否存在于输出中
+                    node_data = node_value.get(node_key)
+                    if node_data:
+                        # 使用对应的提取器获取数据
+                        item = {
+                            "type": event_type,
+                        }
+                        extracted_data = data_extractor(node_data)
+                        # 只返回非空的有效数据
+                        if extracted_data:
+                            return {
+                                **item,
+                                **extracted_data
+                            }
+
+                # 如果没有任何节点数据，返回 None（表示无需流式输出）
+                return None
+
+            def _handle_chat_agent_event(node_value: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                """
+                处理 chat_agent 节点的流式输出事件。
+
+                该函数将原始节点数据转换为前端友好的流式事件格式，
+                支持 chat_completed 事件和 chat_agent 节点完成。
+
+                Args:
+                    node_value: 节点输出的原始数据字典
+
+                Returns:
+                    格式化的流式事件字典，包含 type 和 data 字段；如果无有效数据则返回 None
+                """
+                from typing import Callable, Tuple
+
+                # 定义数据提取器函数 - 每个函数负责从对应类型的节点中提取有用的数据
+                def extract_chat_completed_data(node: Dict[str, Any]) -> Dict[str, Any]:
+                    """从 chat_completed 事件中提取回复内容"""
+                    return {"data": node.get("final_reply", "")}
+
+                def extract_chat_agent_data(node: Dict[str, Any]) -> Dict[str, Any]:
+                    """从 chat_agent 节点中提取完整状态数据"""
+                    return {
+                        "data": node.get("reply", ""),
+                        "conversation_id": node.get("conversation_id"),
+                    }
+
+                # 定义节点处理器配置：节点键 -> (事件类型, 数据提取器函数)
+                node_processors: Dict[str, Tuple[str, Callable[[Dict[str, Any]], Any]]] = {
+                    "finalize": ("content", extract_chat_completed_data),
+                    "chat_agent": ("done", extract_chat_agent_data),
+                }
+
+               # 按优先级遍历节点类型，找到第一个包含有效数据的节点
+                for node_key, (event_type, data_extractor) in node_processors.items():
+                    # 检查该类型的节点是否存在于输出中
+                    node_data = node_value.get(node_key)
+                    if node_data:
+                        # 使用对应的提取器获取数据
+                        item = {
+                            "type": event_type,
+                        }
+                        extracted_data = data_extractor(node_data)
+                        # 只返回非空的有效数据
+                        if extracted_data:
+                            return {
+                                **item,
+                                **extracted_data
+                            }
+                # 如果没有任何节点数据，返回 None（表示无需流式输出）
+                return None
+
+            event_handlers = {
+                "universal_agent": _handle_universal_agent_event,
+                "chat_agent": _handle_chat_agent_event,
+                # 其他子图在此注册: "graph_name": handler
+            }
+
+            def _iter_events(node_name: str, node_value: Dict[str, Any]) -> Any:
+                """
+                处理单个节点的更新事件，返回格式化的流式输出数据。
+
+                Args:
+                    node_name: 节点名称标识符
+                    node_value: 节点输出的数据字典
+
+                Yields:
+                    格式化的流式事件数据或原始节点数据
+                """
+                # 检查是否为已注册的事件处理器
+                handler_key = None
+              
+                # 2. 检查 node_value 中是否包含处理器键且有值
+                for key in event_handlers.keys():
+                    if key in node_value and node_value[key]:
+                        handler_key = key
+                        break
+                
+                # 3. 最后检查 node_name 是否包含处理器名称（作为备选）
+                if not handler_key:
+                    for key in event_handlers.keys():
+                        if isinstance(node_name, tuple) and len(node_name) > 0 and key in node_name[0]:
+                            handler_key = key
+                            break
+                if handler_key:
+                    # 使用对应的处理器转换节点数据
+                    handler = event_handlers[handler_key]
+                    processed_event = handler(node_value)
+                    if processed_event:  # 只在有有效处理结果时输出
+                        # 保证每个事件都携带 conversation_id（前端依赖）
+                        if not processed_event.get("conversation_id"):
+                            processed_event["conversation_id"] = conversation_id
+                        # ---------- 持久化 AI 消息 ----------
+                        if processed_event.get("type") == "done":
+                            ai_content = processed_event.get("data", "") or ""
+                            try:
+                                history_service.save_ai_message_and_optional_summary(
+                                    conversation_id=conversation_id,
+                                    user_id=user_id_value,
+                                    reply=ai_content,
+                                )
+                            except Exception:
+                                logging.getLogger(__name__).exception("保存 AI 消息失败（路由流式）")
+                        yield processed_event
+                else:
+                    yield node_value
+            configurable = {"configurable": {"thread_id": conversation_id}}
+            # 开始异步流式处理，从 agent 的更新流中获取实时数据
+            async for chunk in agent.astream(
+                initial_state,
+                configurable=configurable,
+                stream_mode="updates",  # 使用更新模式获取节点级别的变更
+                subgraphs=True,  # 包含子图的更新，实现完整的流式输出
+            ):
+                # 解析每个数据块，提取节点信息并处理
+                if isinstance(chunk, tuple) and len(chunk) >= 2:
+                    # 从数据块中提取节点标识和节点数据
+                    node_name = chunk[0]  # 节点名称/标识符
+                    node_value = chunk[1]  # 节点输出的数据内容
+
+                    # 调试输出当前处理的节点信息
+                    print(f"----------------------处理节点: '{node_name}' (长度: {len(node_name) if node_name else 0}), 数据: {node_value}----------------------")
+
+                    # 将节点数据转换为前端友好的流式事件格式
+                    for event in _iter_events(node_name, node_value):
+                        # 输出格式化的 SSE (Server-Sent Events) 数据
+                        print(f"----------------------流式输出事件: {event}----------------------")
+                        yield f"data: {json_dumps_utf8(event)}\n\n"
+                else:
+                    # 处理意外的数据格式
+                    error_msg = f"收到意外的数据格式: {type(chunk)}"
+                    print(f"----------------------错误 - {error_msg}, 原始数据: {chunk}----------------------")
+                    # 对于非元组格式的数据，尝试作为普通数据处理
+                    if isinstance(chunk, dict):
+                        print(f"----------------------处理字典格式数据: {chunk}----------------------")
+                        yield chunk
+                    else:
+                        yield f"data: {json_dumps_utf8({'type': 'error', 'data': error_msg})}\n\n"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json_dumps_utf8({'type': 'error', 'data': f'路由对话失败: {str(e)}'})}\n\n"
+
+    return StreamingResponse(
+        generate_router_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/router/chat", summary="路由对话（非流式，自动选择智能体）")
+async def router_chat(
+    request: RouterChatRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    统一路由入口（非流式）：自动选择智能体并返回统一格式：
+    - agent_type：本次选择的智能体类型
+    - data：对应智能体的返回（chat_agent 或 universal_agent）
+    """
+    try:
+        import uuid
+
+        # 如果没有 conversation_id，则视为新会话，在 controller 层统一生成
+        conversation_id = request.conversation_id or str(uuid.uuid4())
+
+        # 从 DB 取会话摘要（若不存在则为空），作为 orchestrator 的 summary 输入
+        summary_text = None
+        history_messages = []
+        if conversation_id:
+            history_context = ConversationHistoryService().get_summary_context(conversation_id)
+            summary_text = history_context.get("summary_text") or history_context.get("raw_summary")
+            history_messages = history_context.get("history_messages") or []
+
+        from app.agents.orchestrator_agent import get_orchestrator_agent
+        from langchain_core.messages import HumanMessage
+
+        agent = get_orchestrator_agent()
+        result = await asyncio.to_thread(
+            agent.invoke,
+            {
+                "messages": [HumanMessage(content=request.message)],
+                "agent_type": request.preferred_agent,
+                "summary": summary_text,
+                "history_messages": history_messages,
+                "reply": None,
+                "universal_result": None,
+                "events": None,
+                # 会话ID由 controller 统一生成并写入 state，graph 内不再生成
+                "conversation_id": conversation_id,
+                "user_id": request.user_id or (str(current_user.id) if current_user else None),
+                "enable_web_search": False,
+                # UniversalAgentState 字段（用于子图兼容）
+                "plan": None,
+                "plan_steps": [],
+                "current_step_index": -1,
+                "execution_results": [],
+                "verification_result": None,
+                "iteration_count": 0,
+                "max_iterations": 10,
+                "plan_parse_failed": False,
+                "turn_count": 0,
+            },
+        )
+
+        agent_type = result.get("agent_type") or "chat_agent"
+        reply = result.get("reply") or ""
+
+        if agent_type == "universal_agent":
+            uni = result.get("universal_result") or {}
+            # 组装成 UniversalAgentResponse（字段缺失时用默认值）
+            payload = {
+                "reply": reply,
+                "conversation_id": conversation_id,
+                "plan": uni.get("plan"),
+                "plan_steps": uni.get("plan_steps") or [],
+                "execution_results": uni.get("execution_results") or [],
+                "verification_result": uni.get("verification_result"),
+                "iteration_count": uni.get("iteration_count") or 0,
+                "summary": uni.get("summary"),
+            }
+            return R.success(data={"agent_type": agent_type, "data": UniversalAgentResponse(**payload)})
+
+        return R.success(
+            data={"agent_type": agent_type, "data": ChatResponse(reply=reply, conversation_id=conversation_id)}
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return R.error(message=f"路由对话失败: {str(e)}")
